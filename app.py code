@@ -1,0 +1,290 @@
+import streamlit as st
+import datetime
+import pickle
+import numpy as np
+import pandas as pd
+from database import get_connection
+from stress_model import calculate_stress
+
+# ---------------- PAGE CONFIG ----------------
+st.set_page_config(page_title="AI Student Stress Monitoring", layout="wide")
+
+# ---------------- LOAD ML MODEL ----------------
+with open("burnout_model.pkl", "rb") as f:
+    ml_model = pickle.load(f)
+
+# ===================== LOGIN SYSTEM =====================
+def pro_login():
+
+    st.markdown("""
+    <style>
+    .stApp {
+        background: linear-gradient(to right, #667eea, #764ba2);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<h1 style='text-align:center; color:white;'>🔐 AI Student Login Portal</h1>", unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1,2,1])
+
+    with col2:
+        role = st.selectbox("Select Role", ["Student", "Admin"])
+        username = st.text_input("User ID")
+        password = st.text_input("Password", type="password")
+
+        if st.button("Login"):
+
+            valid_ids = [f"ST{str(i).zfill(3)}" for i in range(1,201)]
+
+            if role == "Student":
+                if username in valid_ids and password == "student123":
+                    st.session_state.logged_in = True
+                    st.session_state.role = "Student"
+                    st.session_state.user = username
+                    st.rerun()
+                else:
+                    st.error("Invalid Student ID or Password")
+
+            elif role == "Admin":
+                if username == "admin" and password == "admin123":
+                    st.session_state.logged_in = True
+                    st.session_state.role = "Admin"
+                    st.session_state.user = "admin"
+                    st.rerun()
+                else:
+                    st.error("Invalid Admin Credentials")
+
+# ---------------- SESSION ----------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "role" not in st.session_state:
+    st.session_state.role = None
+
+if not st.session_state.logged_in:
+    pro_login()
+    st.stop()
+
+# ---------------- UI STYLE ----------------
+st.markdown("""
+<style>
+.stApp { background: linear-gradient(to right, #e3f2fd, #f8bbd0); }
+h1, h2, h3 { color: #0d47a1; }
+.stButton>button { background-color:#1565c0; color:white; border-radius:10px;}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- SIDEBAR ----------------
+st.sidebar.title("Navigation")
+
+if st.session_state.role == "Student":
+    page = "Student Prediction"
+else:
+    page = st.sidebar.radio("Go to", ["Student Prediction", "Admin Dashboard"])
+
+# =====================================================
+# STUDENT PAGE
+# =====================================================
+if page == "Student Prediction":
+
+    st.title("🧠 AI Student Stress & Burnout Monitoring")
+
+    if st.session_state.role == "Student":
+        st.subheader(f"👋 Welcome, {st.session_state.user}")
+
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+        SELECT stress_score, risk_level, date
+        FROM predictions
+        WHERE student_id=%s ORDER BY date DESC LIMIT 1
+        """,(st.session_state.user,))
+        last = cursor.fetchone()
+
+        if last:
+            c1,c2,c3 = st.columns(3)
+            c1.metric("Stress", last[0])
+            c2.metric("Risk", last[1])
+            c3.metric("Date", str(last[2]))
+
+        cursor.execute("""
+        SELECT date,stress_score FROM predictions
+        WHERE student_id=%s ORDER BY date
+        """,(st.session_state.user,))
+        trend = cursor.fetchall()
+        conn.close()
+
+        if trend:
+            df = pd.DataFrame(trend,columns=["Date","Stress"])
+            df["Date"]=pd.to_datetime(df["Date"])
+            st.line_chart(df.set_index("Date"))
+
+    if st.session_state.role=="Student":
+        student_id=st.text_input("Student ID",value=st.session_state.user,disabled=True)
+    else:
+        student_id=st.text_input("Student ID")
+
+    sleep=st.slider("Sleep",0.0,12.0,6.0)
+    screen=st.slider("Screen",0.0,15.0,5.0)
+    study=st.slider("Study",0.0,12.0,4.0)
+    mood=st.slider("Mood",1,5,3)
+    activity=st.slider("Activity",0,120,30)
+    attendance=st.slider("Attendance",0,100,80)
+
+    if st.button("Analyze"):
+
+        input_data=np.array([[sleep,screen,study,mood,activity,attendance]])
+        pred=ml_model.predict(input_data)[0]
+        prob=ml_model.predict_proba(input_data)[0][1]
+
+        stress=calculate_stress(sleep,screen,mood,activity,attendance,study)
+
+        level="Low"
+        if pred==1: level="High"
+        elif prob>0.4: level="Moderate"
+
+        conn=get_connection()
+        cur=conn.cursor()
+
+        # ✅ ONLY FIX APPLIED HERE
+        cur.execute("""
+INSERT INTO predictions 
+(student_id, stress_score, burnout_probability, risk_level, recommendation, date)
+VALUES (%s,%s,%s,%s,%s,%s)
+""",(student_id,stress,prob,level,level+" Risk",datetime.date.today()))
+
+        conn.commit(); conn.close()
+
+        st.success(f"Stress: {stress}")
+        st.warning(f"Risk: {level}")
+
+        if level=="High":
+            st.error("⚠ Immediate counseling required")
+        elif level=="Moderate":
+            st.warning("⚠ Reduce screen time & improve sleep")
+        else:
+            st.success("✅ Healthy condition")
+
+# =====================================================
+# ADMIN DASHBOARD
+# =====================================================
+if page=="Admin Dashboard":
+
+    st.title("🏢 Institutional Stress Analytics Dashboard")
+    st.markdown("### 📊 Advanced Analytics Panel")
+
+    conn=get_connection()
+    cur=conn.cursor()
+
+    cur.execute("SELECT COUNT(DISTINCT student_id) FROM predictions")
+    total_students=cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM predictions")
+    total=cur.fetchone()[0]
+
+    cur.execute("SELECT AVG(stress_score) FROM predictions")
+    avg=cur.fetchone()[0] or 0
+
+    cur.execute("SELECT COUNT(*) FROM predictions WHERE risk_level='High'")
+    high=cur.fetchone()[0]
+
+    conn.close()
+
+    p=(high/total*100) if total else 0
+
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Students",total_students)
+    c2.metric("Records",total)
+    c3.metric("Avg Stress",round(avg,2))
+    c4.metric("High %",round(p,2))
+
+    st.caption("📌 Real-time analytics")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT student_id, risk_level
+    FROM predictions p1
+    WHERE date = (
+        SELECT MAX(date)
+        FROM predictions p2
+        WHERE p2.student_id = p1.student_id
+    )
+    """)
+
+    data = cursor.fetchall()
+    conn.close()
+
+    df = pd.DataFrame(data, columns=["student_id", "risk_level"])
+
+    risk_counts = df["risk_level"].value_counts().to_dict()
+    for level in ["Low", "Moderate", "High"]:
+        if level not in risk_counts:
+            risk_counts[level] = 0
+
+    risk_counts = pd.DataFrame(list(risk_counts.items()), columns=["risk_level", "count"])
+
+    if not risk_counts.empty:
+        st.bar_chart(risk_counts.set_index("risk_level"))
+
+        import matplotlib.pyplot as plt
+
+        col1, col2, col3 = st.columns([1,2,1])
+        with col2:
+            fig, ax = plt.subplots(figsize=(3,3))
+            ax.pie(risk_counts["count"], labels=risk_counts["risk_level"], autopct="%1.1f%%")
+            st.pyplot(fig, use_container_width=False)
+
+        st.write("### Risk Summary (Students)")
+        for i in risk_counts.values:
+            st.write(i)
+
+    conn=get_connection()
+    df2=pd.read_sql("SELECT date,AVG(stress_score) s FROM predictions GROUP BY date",conn)
+    conn.close()
+
+    if not df2.empty:
+        df2["date"]=pd.to_datetime(df2["date"])
+        st.line_chart(df2.set_index("date"))
+
+    search=st.text_input("Search Student")
+
+    conn=get_connection()
+    cur=conn.cursor()
+    cur.execute("SELECT DISTINCT student_id FROM predictions")
+    students=[i[0] for i in cur.fetchall()]
+    conn.close()
+
+    if search:
+        students=[s for s in students if search.lower() in s.lower()]
+
+    sel=st.selectbox("Student",students)
+
+    if sel:
+        conn = get_connection()
+        df_student = pd.read_sql(f"""
+        SELECT date, stress_score, risk_level
+        FROM predictions
+        WHERE student_id = '{sel}'
+        ORDER BY date
+        """, conn)
+        conn.close()
+
+        if not df_student.empty:
+            df_student["date"]=pd.to_datetime(df_student["date"])
+            st.subheader(f"📊 Data for {sel}")
+            st.line_chart(df_student.set_index("date")[["stress_score"]])
+            st.write("### Last 5 Records")
+            st.write(df_student.tail(5))
+
+    st.write("### 🚨 Critical Students")
+    conn=get_connection()
+    df3=pd.read_sql("SELECT student_id,stress_score FROM predictions WHERE risk_level='High' ORDER BY stress_score DESC LIMIT 10",conn)
+    conn.close()
+
+    for _,r in df3.iterrows():
+        st.error(f"{r[0]} → {r[1]}")
+
+    st.success("✅ System Active")
